@@ -1,0 +1,15 @@
+# 設定ファイル
+config.py
+
+# Python関連
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# その他
+.DS_Store 

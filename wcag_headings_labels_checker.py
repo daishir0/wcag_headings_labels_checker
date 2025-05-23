@@ -407,17 +407,162 @@ def analyze_elements(elements, url):
 
     try:
         # Extract and parse JSON from response
-        start_idx = response_text.find('{')
-        end_idx = response_text.rfind('}') + 1
+        import re
+        import json5  # より寛容なJSONパーサー
         
-        if start_idx != -1 and end_idx != -1:
-            json_str = response_text[start_idx:end_idx]
-            result = json.loads(json_str)
-            if 'elements' in result:
-                print(f"{len(result['elements'])}個の要素の分析が完了しました")
-                return result['elements']
-            else:
-                print("警告: 応答にelementsフィールドがありません")
+        def process_json(text):
+            """JSON文字列を処理する"""
+            print("\n=== デバッグ: JSON処理開始 ===")
+            print(f"入力テキストの長さ: {len(text)}")
+            
+            # 1. 最初の波括弧を見つける
+            start = text.find('{')
+            if start == -1:
+                print("警告: 開始波括弧が見つかりません")
+                return None
+            
+            # 2. 波括弧の数をカウント
+            open_count = text[start:].count('{')
+            close_count = text[start:].count('}')
+            print(f"波括弧の数: 開き{open_count}個, 閉じ{close_count}個")
+            
+            # 3. 不足している閉じ波括弧を補完
+            missing_braces = open_count - close_count
+            if missing_braces > 0:
+                print(f"閉じ波括弧が{missing_braces}個不足しています")
+                # 最後の有効な閉じ波括弧を見つける
+                last_valid_close = text.rfind('}')
+                if last_valid_close != -1:
+                    # 最後の閉じ波括弧までを抽出
+                    text = text[start:last_valid_close+1]
+                    # 最後の要素が完全かチェック
+                    last_comma_pos = text.rfind(',')
+                    last_quote_pos = text.rfind('"')
+                    if last_comma_pos > last_quote_pos:
+                        # 最後のカンマ以降を削除
+                        text = text[:last_comma_pos]
+                    # 閉じ波括弧を追加
+                    text += ']}'
+            
+            # 4. 改行と余分な空白を削除
+            text = ' '.join(text.split())
+            print("空白正規化後の長さ:", len(text))
+            
+            try:
+                # 5. 直接JSON5でパース
+                result = json5.loads(text)
+                print("JSON5パース成功")
+                return result
+            except Exception as e:
+                print(f"JSON5パースエラー: {e}")
+                print("JSON文字列サンプル:")
+                print(f"最初の200文字: {text[:200]}")
+                print(f"最後の200文字: {text[-200:]}")
+                return None
+            
+        # JSONを抽出して処理
+        result = process_json(response_text)
+        if result and 'elements' in result:
+            print(f"{len(result['elements'])}個の要素の分析が完了しました")
+            return result['elements']
+        else:
+            print("警告: 有効なJSONが見つかりませんでした")
+            return None
+        
+        def extract_json(text):
+            print("\n=== デバッグ: JSON抽出開始 ===")
+            print(f"入力テキストの長さ: {len(text)}")
+            print(f"最初の100文字:\n{text[:100]}")
+            print(f"最後の100文字:\n{text[-100:]}")
+            
+            # 最初の波括弧を見つける
+            start = text.find('{')
+            if start == -1:
+                print("警告: 開始波括弧が見つかりません")
+                return None
+            
+            # 波括弧の数をカウント
+            open_count = text[start:].count('{')
+            close_count = text[start:].count('}')
+            print(f"波括弧の数: 開き{open_count}個, 閉じ{close_count}個")
+            
+            # 不足している閉じ波括弧を補完
+            missing_braces = open_count - close_count
+            if missing_braces > 0:
+                print(f"閉じ波括弧が{missing_braces}個不足しています")
+                # 最後の有効な閉じ波括弧を見つける
+                last_valid_close = text.rfind('}')
+                if last_valid_close != -1:
+                    # 最後の閉じ波括弧までを抽出
+                    json_str = text[start:last_valid_close+1]
+                    # 最後の要素が完全かチェック
+                    last_comma_pos = json_str.rfind(',')
+                    last_quote_pos = json_str.rfind('"')
+                    if last_comma_pos > last_quote_pos:
+                        # 最後のカンマ以降を削除
+                        json_str = json_str[:last_comma_pos]
+                    # 閉じ波括弧を追加
+                    json_str += ']}'
+                    # JSON文字列を正規化
+                    return normalize_json(json_str)
+            
+            # 通常の抽出（閉じ波括弧が十分にある場合）
+            stack = []
+            for i, char in enumerate(text[start:], start):
+                if char == '{':
+                    stack.append(char)
+                elif char == '}':
+                    if stack:
+                        stack.pop()
+                        if not stack:
+                            # 完全なJSONを抽出して正規化
+                            return normalize_json(text[start:i+1])
+            
+            print("警告: 有効なJSONが見つかりません")
+            return None
+        
+        # JSONを抽出
+        json_str = extract_json(response_text)
+        
+        if json_str:
+            print("\n=== デバッグ: JSON前処理開始 ===")
+            # 1. 改行と余分な空白を正規化
+            json_str = ' '.join(json_str.split())
+            print("空白正規化後の長さ:", len(json_str))
+            
+            # 2. 文字列内の改行を保持しながら正規化
+            json_str = re.sub(r'(?<!\\)\\n', ' ', json_str)
+            print("改行正規化後の長さ:", len(json_str))
+            
+            # 3. 引用符の正規化
+            json_str = re.sub(r'(?<!\\)"', '\\"', json_str)
+            json_str = json_str.replace('\\\\"', '\\"')
+            print("引用符正規化後の長さ:", len(json_str))
+            
+            try:
+                print("\n=== デバッグ: JSONパース開始 ===")
+                # より寛容なパーサーでJSONを解析
+                result = json5.loads(json_str)
+                if 'elements' in result:
+                    print(f"{len(result['elements'])}個の要素の分析が完了しました")
+                    return result['elements']
+                else:
+                    print("警告: 応答にelementsフィールドがありません")
+                    print("利用可能なキー:", list(result.keys()))
+            except Exception as e:
+                print(f"\nJSON5デコードエラー: {e}")
+                print("JSON文字列の処理に失敗しました。デバッグ情報:")
+                print(f"処理後のJSON文字列の長さ: {len(json_str)}")
+                print(f"最初の200文字: {json_str[:200]}")
+                print(f"最後の200文字: {json_str[-200:]}")
+                print("\nエラー発生箇所の前後:")
+                error_pos = int(str(e).split()[-1]) if str(e).split()[-1].isdigit() else 0
+                start_pos = max(0, error_pos - 100)
+                end_pos = min(len(json_str), error_pos + 100)
+                print(f"位置{start_pos}から{end_pos}まで:")
+                print(json_str[start_pos:end_pos])
+        else:
+            print("警告: 応答からJSONを抽出できませんでした")
     except Exception as e:
         print(f"エラー: Claudeの応答の処理中に問題が発生しました: {e}")
     

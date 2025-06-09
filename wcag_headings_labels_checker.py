@@ -150,14 +150,41 @@ def get_page_content(driver):
                 # 要素の一意の識別子を生成
                 tag_name = element.get_attribute("tagName").lower()
                 element_id = element.get_attribute("id")
-                text = normalize_text(element.text or '')
+                # 複数の方法でテキストを取得（非表示要素のテキストも取得）
+                visible_text = normalize_text(element.text or '')
+                inner_text = normalize_text(element.get_attribute("innerText") or '')
+                text_content = normalize_text(element.get_attribute("textContent") or '')
+                
+                # 最も長いテキストを使用
+                text = max([visible_text, inner_text, text_content], key=len)
+                
+                # テキストが空の場合、alt属性やaria-label属性の値を取得
+                if not text:
+                    alt_text = element.get_attribute("alt")
+                    aria_label = element.get_attribute("aria-label")
+                    aria_labelledby = element.get_attribute("aria-labelledby")
+                    
+                    if alt_text:
+                        text = normalize_text(alt_text)
+                    elif aria_label:
+                        text = normalize_text(aria_label)
+                    elif aria_labelledby:
+                        # aria-labelledbyで参照される要素のテキストを取得
+                        try:
+                            labelledby_element = driver.find_element(By.ID, aria_labelledby)
+                            text = normalize_text(labelledby_element.text or '')
+                        except:
+                            pass
                 
                 # XPATHを識別子として使用
                 elements[xpath] = {
                     'tag': tag_name,
                     'id': element_id,
                     'text': text,
-                    'xpath': xpath
+                    'xpath': xpath,
+                    'alt': element.get_attribute("alt") or '',
+                    'aria_label': element.get_attribute("aria-label") or '',
+                    'aria_labelledby': element.get_attribute("aria-labelledby") or ''
                 }
                 
                 if DEBUG:
@@ -193,14 +220,52 @@ def get_page_content(driver):
             # 要素の一意の識別子を生成
             tag_name = element.get_attribute("tagName").lower()
             element_id = element.get_attribute("id")
-            text = normalize_text(element.text or '')
+            # 複数の方法でテキストを取得（非表示要素のテキストも取得）
+            visible_text = normalize_text(element.text or '')
+            inner_text = normalize_text(element.get_attribute("innerText") or '')
+            text_content = normalize_text(element.get_attribute("textContent") or '')
+            
+            # 最も長いテキストを使用
+            text = max([visible_text, inner_text, text_content], key=len)
+            
+            # テキストが空の場合、alt属性やaria-label属性の値を取得
+            if not text:
+                alt_text = element.get_attribute("alt")
+                aria_label = element.get_attribute("aria-label")
+                aria_labelledby = element.get_attribute("aria-labelledby")
+                for_attr = element.get_attribute("for")
+                
+                if alt_text:
+                    text = normalize_text(alt_text)
+                elif aria_label:
+                    text = normalize_text(aria_label)
+                elif aria_labelledby:
+                    # aria-labelledbyで参照される要素のテキストを取得
+                    try:
+                        labelledby_element = driver.find_element(By.ID, aria_labelledby)
+                        text = normalize_text(labelledby_element.text or '')
+                    except:
+                        pass
+                elif for_attr:
+                    # forで参照される要素のplaceholder属性を取得
+                    try:
+                        for_element = driver.find_element(By.ID, for_attr)
+                        placeholder = for_element.get_attribute("placeholder")
+                        if placeholder:
+                            text = normalize_text(placeholder)
+                    except:
+                        pass
             
             # XPATHを識別子として使用
             elements[xpath] = {
                 'tag': tag_name,
                 'id': element_id,
                 'text': text,
-                'xpath': xpath
+                'xpath': xpath,
+                'alt': element.get_attribute("alt") or '',
+                'aria_label': element.get_attribute("aria-label") or '',
+                'aria_labelledby': element.get_attribute("aria-labelledby") or '',
+                'for': element.get_attribute("for") or ''
             }
             
             if DEBUG:
@@ -229,8 +294,17 @@ def extract_headings(soup, elements):
                 'element_xpath': next(
                     (info['xpath'] for xpath, info in elements.items()
                      if info['tag'] == f'h{level}' and
-                     normalize_text(info['text']) == normalize_text(text)),
-                    'Unknown'
+                     normalize_text(info['text']).replace(' ', '') == normalize_text(text).replace(' ', '')),
+                    next(
+                        (info['xpath'] for xpath, info in elements.items()
+                         if info['tag'] == f'h{level}' and
+                         normalize_text(info['text']) in normalize_text(text) or normalize_text(text) in normalize_text(info['text'])),
+                        next(
+                            (info['xpath'] for xpath, info in elements.items()
+                             if info['tag'] == f'h{level}'),
+                            'Unknown'
+                        )
+                    )
                 )
             })
             
@@ -270,8 +344,17 @@ def extract_labels(soup, elements):
             'element_xpath': next(
                 (info['xpath'] for xpath, info in elements.items()
                  if info['tag'] == 'label' and
-                 normalize_text(info['text']) == normalize_text(text)),
-                'Unknown'
+                 normalize_text(info['text']).replace(' ', '') == normalize_text(text).replace(' ', '')),
+                next(
+                    (info['xpath'] for xpath, info in elements.items()
+                     if info['tag'] == 'label' and
+                     normalize_text(info['text']) in normalize_text(text) or normalize_text(text) in normalize_text(info['text'])),
+                    next(
+                        (info['xpath'] for xpath, info in elements.items()
+                         if info['tag'] == 'label'),
+                        'Unknown'
+                    )
+                )
             )
         })
         
@@ -310,31 +393,42 @@ def get_element_context(element):
 def analyze_elements(elements, url):
     """
     Use Claude to analyze the descriptiveness of headings and labels
+    一度に1つの要素を分析し、クライアント側でXPATHを管理する
     """
     client = anthropic.Anthropic(
         api_key=ANTHROPIC_API_KEY,
     )
     
-    # Prepare elements data for analysis
-    elements_data = []
-    for element in elements:
+    analyzed_elements = []
+    total_elements = len(elements)
+    
+    print(f"合計 {total_elements} 個の要素を分析します...")
+    
+    # 各要素を個別に分析
+    for index, element in enumerate(elements):
+        element_type = element['type']
+        element_text = element['text']
+        element_xpath = element.get('element_xpath', 'Unknown')
+        
+        print(f"要素 {index+1}/{total_elements} を分析中: {element_type} '{element_text}'")
+        
+        # 要素データを準備
         element_data = {
-            'type': element['type'],
-            'text': element['text'],
+            'type': element_type,
+            'text': element_text,
             'html': element['html'],
-            'context': element['context'],
-            'element_xpath': element.get('element_xpath', 'Unknown')
+            'context': element['context']
         }
+        
         if 'control_type' in element:
             element_data['control_type'] = element['control_type']
             element_data['control_id'] = element['control_id']
-        elements_data.append(element_data)
-    
-    # Format the elements data as JSON
-    elements_json = json.dumps({"elements": elements_data}, ensure_ascii=False, indent=2)
-    
-    # Create the prompt for Claude
-    prompt = f"""# あなたはWCAG 2.4.6 見出しとラベルの評価を専門とするアクセシビリティテストの専門家です。
+        
+        # 要素データをJSON形式に変換
+        element_json = json.dumps(element_data, ensure_ascii=False, indent=2)
+        
+        # Claudeへのプロンプトを作成
+        prompt = f"""# あなたはWCAG 2.4.6 見出しとラベルの評価を専門とするアクセシビリティテストの専門家です。
 あなたの任務は、見出しとラベルが適切にトピックや目的を説明しているかを分析することです。
 
 # WCAG 2.4.6 見出しとラベルの要件:
@@ -354,219 +448,104 @@ def analyze_elements(elements, url):
 
 # テスト対象のページ: {url}
 
-# 以下の要素を分析してください。各要素について：
+# 以下の要素を分析してください：
 1. 説明性が十分か（true/false）
 2. 現在の説明の評価
 3. 改善が必要な場合は具体的な推奨事項
 
 # 回答のフォーマット:
 {{
-  "elements": [
-    {{
-      "type": "h1",
-      "text": "ページタイトル",
-      "descriptive": true,
-      "evaluation": "明確で具体的なタイトルです",
-      "recommendations": []
-    }},
-    {{
-      "type": "label",
-      "text": "姓",
-      "descriptive": false,
-      "evaluation": "ラベルが簡素すぎます",
-      "recommendations": [
-        "「姓（例：山田）」のように例を追加する",
-        "必須項目の場合はその旨を明記する"
-      ]
-    }}
+  "descriptive": true/false,
+  "evaluation": "評価コメント",
+  "recommendations": [
+    "推奨事項1",
+    "推奨事項2"
   ]
 }}
 
 # 分析対象の要素:
-{elements_json}"""
+{element_json}"""
 
-    print("Claudeに見出しとラベルの分析リクエストを送信中...")
+        try:
+            # Claudeに分析リクエストを送信
+            message = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=1000,
+                system="あなたはWCAGコンプライアンス評価、特に見出しとラベルの説明性に特化したアクセシビリティテストの専門家です。",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            response_text = str(message.content[0].text)
+            
+            if DEBUG:
+                print("\n=== Claudeの分析結果 ===")
+                print(response_text)
+            
+            # JSONを抽出して解析
+            import json5
+            
+            # JSONを抽出
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                
+                try:
+                    # JSON5でパース
+                    result = json5.loads(json_str)
+                    
+                    # 分析結果に元の要素情報を追加
+                    result['type'] = element_type
+                    result['text'] = element_text
+                    result['element_xpath'] = element_xpath
+                    
+                    # 推奨事項がない場合は空リストを設定
+                    if 'recommendations' not in result:
+                        result['recommendations'] = []
+                    
+                    analyzed_elements.append(result)
+                    print(f"要素 {index+1}/{total_elements} の分析が完了しました")
+                    
+                except Exception as e:
+                    print(f"JSON解析エラー: {e}")
+                    # エラーが発生した場合でも、基本的な情報を含む要素を追加
+                    analyzed_elements.append({
+                        'type': element_type,
+                        'text': element_text,
+                        'element_xpath': element_xpath,
+                        'descriptive': False,
+                        'evaluation': "分析中にエラーが発生しました",
+                        'recommendations': ["再分析を試みてください"]
+                    })
+            else:
+                print("JSONが見つかりませんでした")
+                # JSONが見つからない場合でも、基本的な情報を含む要素を追加
+                analyzed_elements.append({
+                    'type': element_type,
+                    'text': element_text,
+                    'element_xpath': element_xpath,
+                    'descriptive': False,
+                    'evaluation': "分析結果からJSONを抽出できませんでした",
+                    'recommendations': ["再分析を試みてください"]
+                })
+                
+        except Exception as e:
+            print(f"エラー: Claudeへのリクエスト中に問題が発生しました: {e}")
+            # エラーが発生した場合でも、基本的な情報を含む要素を追加
+            analyzed_elements.append({
+                'type': element_type,
+                'text': element_text,
+                'element_xpath': element_xpath,
+                'descriptive': False,
+                'evaluation': f"Claudeへのリクエスト中にエラーが発生しました: {e}",
+                'recommendations': ["再分析を試みてください"]
+            })
     
-    try:
-        message = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=4096,
-            system="あなたはWCAGコンプライアンス評価、特に見出しとラベルの説明性に特化したアクセシビリティテストの専門家です。",
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        
-        response_text = str(message.content[0].text)
-        print("\n=== Claudeの分析結果 ===")
-        if DEBUG:
-            print(response_text)
-    except Exception as e:
-        print(f"\nエラー: Claudeへのリクエスト中に問題が発生しました: {e}")
-        return None
-
-    try:
-        # Extract and parse JSON from response
-        import re
-        import json5  # より寛容なJSONパーサー
-        
-        def process_json(text):
-            """JSON文字列を処理する"""
-            print("\n=== デバッグ: JSON処理開始 ===")
-            print(f"入力テキストの長さ: {len(text)}")
-            
-            # 1. 最初の波括弧を見つける
-            start = text.find('{')
-            if start == -1:
-                print("警告: 開始波括弧が見つかりません")
-                return None
-            
-            # 2. 波括弧の数をカウント
-            open_count = text[start:].count('{')
-            close_count = text[start:].count('}')
-            print(f"波括弧の数: 開き{open_count}個, 閉じ{close_count}個")
-            
-            # 3. 不足している閉じ波括弧を補完
-            missing_braces = open_count - close_count
-            if missing_braces > 0:
-                print(f"閉じ波括弧が{missing_braces}個不足しています")
-                # 最後の有効な閉じ波括弧を見つける
-                last_valid_close = text.rfind('}')
-                if last_valid_close != -1:
-                    # 最後の閉じ波括弧までを抽出
-                    text = text[start:last_valid_close+1]
-                    # 最後の要素が完全かチェック
-                    last_comma_pos = text.rfind(',')
-                    last_quote_pos = text.rfind('"')
-                    if last_comma_pos > last_quote_pos:
-                        # 最後のカンマ以降を削除
-                        text = text[:last_comma_pos]
-                    # 閉じ波括弧を追加
-                    text += ']}'
-            
-            # 4. 改行と余分な空白を削除
-            text = ' '.join(text.split())
-            print("空白正規化後の長さ:", len(text))
-            
-            try:
-                # 5. 直接JSON5でパース
-                result = json5.loads(text)
-                print("JSON5パース成功")
-                return result
-            except Exception as e:
-                print(f"JSON5パースエラー: {e}")
-                print("JSON文字列サンプル:")
-                print(f"最初の200文字: {text[:200]}")
-                print(f"最後の200文字: {text[-200:]}")
-                return None
-            
-        # JSONを抽出して処理
-        result = process_json(response_text)
-        if result and 'elements' in result:
-            print(f"{len(result['elements'])}個の要素の分析が完了しました")
-            return result['elements']
-        else:
-            print("警告: 有効なJSONが見つかりませんでした")
-            return None
-        
-        def extract_json(text):
-            print("\n=== デバッグ: JSON抽出開始 ===")
-            print(f"入力テキストの長さ: {len(text)}")
-            print(f"最初の100文字:\n{text[:100]}")
-            print(f"最後の100文字:\n{text[-100:]}")
-            
-            # 最初の波括弧を見つける
-            start = text.find('{')
-            if start == -1:
-                print("警告: 開始波括弧が見つかりません")
-                return None
-            
-            # 波括弧の数をカウント
-            open_count = text[start:].count('{')
-            close_count = text[start:].count('}')
-            print(f"波括弧の数: 開き{open_count}個, 閉じ{close_count}個")
-            
-            # 不足している閉じ波括弧を補完
-            missing_braces = open_count - close_count
-            if missing_braces > 0:
-                print(f"閉じ波括弧が{missing_braces}個不足しています")
-                # 最後の有効な閉じ波括弧を見つける
-                last_valid_close = text.rfind('}')
-                if last_valid_close != -1:
-                    # 最後の閉じ波括弧までを抽出
-                    json_str = text[start:last_valid_close+1]
-                    # 最後の要素が完全かチェック
-                    last_comma_pos = json_str.rfind(',')
-                    last_quote_pos = json_str.rfind('"')
-                    if last_comma_pos > last_quote_pos:
-                        # 最後のカンマ以降を削除
-                        json_str = json_str[:last_comma_pos]
-                    # 閉じ波括弧を追加
-                    json_str += ']}'
-                    # JSON文字列を正規化
-                    return normalize_json(json_str)
-            
-            # 通常の抽出（閉じ波括弧が十分にある場合）
-            stack = []
-            for i, char in enumerate(text[start:], start):
-                if char == '{':
-                    stack.append(char)
-                elif char == '}':
-                    if stack:
-                        stack.pop()
-                        if not stack:
-                            # 完全なJSONを抽出して正規化
-                            return normalize_json(text[start:i+1])
-            
-            print("警告: 有効なJSONが見つかりません")
-            return None
-        
-        # JSONを抽出
-        json_str = extract_json(response_text)
-        
-        if json_str:
-            print("\n=== デバッグ: JSON前処理開始 ===")
-            # 1. 改行と余分な空白を正規化
-            json_str = ' '.join(json_str.split())
-            print("空白正規化後の長さ:", len(json_str))
-            
-            # 2. 文字列内の改行を保持しながら正規化
-            json_str = re.sub(r'(?<!\\)\\n', ' ', json_str)
-            print("改行正規化後の長さ:", len(json_str))
-            
-            # 3. 引用符の正規化
-            json_str = re.sub(r'(?<!\\)"', '\\"', json_str)
-            json_str = json_str.replace('\\\\"', '\\"')
-            print("引用符正規化後の長さ:", len(json_str))
-            
-            try:
-                print("\n=== デバッグ: JSONパース開始 ===")
-                # より寛容なパーサーでJSONを解析
-                result = json5.loads(json_str)
-                if 'elements' in result:
-                    print(f"{len(result['elements'])}個の要素の分析が完了しました")
-                    return result['elements']
-                else:
-                    print("警告: 応答にelementsフィールドがありません")
-                    print("利用可能なキー:", list(result.keys()))
-            except Exception as e:
-                print(f"\nJSON5デコードエラー: {e}")
-                print("JSON文字列の処理に失敗しました。デバッグ情報:")
-                print(f"処理後のJSON文字列の長さ: {len(json_str)}")
-                print(f"最初の200文字: {json_str[:200]}")
-                print(f"最後の200文字: {json_str[-200:]}")
-                print("\nエラー発生箇所の前後:")
-                error_pos = int(str(e).split()[-1]) if str(e).split()[-1].isdigit() else 0
-                start_pos = max(0, error_pos - 100)
-                end_pos = min(len(json_str), error_pos + 100)
-                print(f"位置{start_pos}から{end_pos}まで:")
-                print(json_str[start_pos:end_pos])
-        else:
-            print("警告: 応答からJSONを抽出できませんでした")
-    except Exception as e:
-        print(f"エラー: Claudeの応答の処理中に問題が発生しました: {e}")
-    
-    return None
+    print(f"すべての要素（{len(analyzed_elements)}個）の分析が完了しました")
+    return analyzed_elements
 
 def check_headings_and_labels(url):
     """
@@ -602,15 +581,94 @@ def check_headings_and_labels(url):
         # Parse page content and get element XPaths
         soup, elements = get_page_content(driver)
         
-        # Extract headings and labels
-        headings = extract_headings(soup, elements)
-        labels = extract_labels(soup, elements)
+        # 直接Seleniumで取得した要素を使用
+        all_elements = []
         
-        print(f"見出し要素を {len(headings)} 個見つけました")
-        print(f"ラベル要素を {len(labels)} 個見つけました")
+        # 見出し要素を直接追加
+        heading_count = 0
+        for level in range(1, 7):
+            for xpath, info in elements.items():
+                if info['tag'] == f'h{level}':
+                    heading_count += 1
+                    # テキスト情報を構築（テキストが空の場合は代替テキストを使用）
+                    element_text = info['text']
+                    alt_info = ""
+                    if not element_text:
+                        if 'alt' in info and info['alt']:
+                            element_text = info['alt']
+                            alt_info = f" [alt属性から]"
+                        elif 'aria_label' in info and info['aria_label']:
+                            element_text = info['aria_label']
+                            alt_info = f" [aria-label属性から]"
+                        elif 'aria_labelledby' in info and info['aria_labelledby']:
+                            alt_info = f" [aria-labelledby属性: {info['aria_labelledby']}]"
+                    
+                    # HTML表現を構築
+                    html = f"<{info['tag']}"
+                    if 'id' in info and info['id']:
+                        html += f" id=\"{info['id']}\""
+                    if 'alt' in info and info['alt']:
+                        html += f" alt=\"{info['alt']}\""
+                    if 'aria_label' in info and info['aria_label']:
+                        html += f" aria-label=\"{info['aria_label']}\""
+                    if 'aria_labelledby' in info and info['aria_labelledby']:
+                        html += f" aria-labelledby=\"{info['aria_labelledby']}\""
+                    html += f">{element_text}</{info['tag']}>"
+                    
+                    all_elements.append({
+                        'type': f'h{level}',
+                        'text': element_text + alt_info,
+                        'html': html,
+                        'context': {'parent_tag': 'div', 'parent_class': None, 'previous_text': None, 'next_text': None},
+                        'element_xpath': xpath
+                    })
         
-        # Analyze all elements
-        all_elements = headings + labels
+        # ラベル要素を直接追加
+        label_count = 0
+        for xpath, info in elements.items():
+            if info['tag'] == 'label':
+                label_count += 1
+                # テキスト情報を構築（テキストが空の場合は代替テキストを使用）
+                element_text = info['text']
+                alt_info = ""
+                if not element_text:
+                    if 'alt' in info and info['alt']:
+                        element_text = info['alt']
+                        alt_info = f" [alt属性から]"
+                    elif 'aria_label' in info and info['aria_label']:
+                        element_text = info['aria_label']
+                        alt_info = f" [aria-label属性から]"
+                    elif 'aria_labelledby' in info and info['aria_labelledby']:
+                        alt_info = f" [aria-labelledby属性: {info['aria_labelledby']}]"
+                    elif 'for' in info and info['for']:
+                        alt_info = f" [for属性: {info['for']}]"
+                
+                # HTML表現を構築
+                html = f"<{info['tag']}"
+                if 'id' in info and info['id']:
+                    html += f" id=\"{info['id']}\""
+                if 'for' in info and info['for']:
+                    html += f" for=\"{info['for']}\""
+                if 'alt' in info and info['alt']:
+                    html += f" alt=\"{info['alt']}\""
+                if 'aria_label' in info and info['aria_label']:
+                    html += f" aria-label=\"{info['aria_label']}\""
+                if 'aria_labelledby' in info and info['aria_labelledby']:
+                    html += f" aria-labelledby=\"{info['aria_labelledby']}\""
+                html += f">{element_text}</{info['tag']}>"
+                
+                all_elements.append({
+                    'type': 'label',
+                    'text': element_text + alt_info,
+                    'html': html,
+                    'context': {'parent_tag': 'form', 'parent_class': None, 'previous_text': None, 'next_text': None},
+                    'control_type': None,
+                    'control_id': info['id'],
+                    'element_xpath': xpath
+                })
+        
+        print(f"見出し要素を {heading_count} 個見つけました")
+        print(f"ラベル要素を {label_count} 個見つけました")
         analyzed_elements = analyze_elements(all_elements, url)
         
         if analyzed_elements:
@@ -621,8 +679,8 @@ def check_headings_and_labels(url):
             final_report = {
                 "url": url,
                 "total_elements": len(all_elements),
-                "total_headings": len(headings),
-                "total_labels": len(labels),
+                "total_headings": heading_count,
+                "total_labels": label_count,
                 "descriptive_elements": len(descriptive_elements),
                 "non_descriptive_elements": len(non_descriptive_elements),
                 "descriptive_elements_details": descriptive_elements,
@@ -649,10 +707,23 @@ def print_report(report):
     print(f"改善が必要な要素: {report['non_descriptive_elements']}")
     print(f"\nWCAG 2.4.6 準拠状況: {'準拠' if report['wcag_2_4_6_compliant'] else '非準拠'}")
     
+    # すべての要素の詳細を出力
+    print("\n=== すべての要素の詳細 ===")
+    
+    # 説明的な要素（問題ない要素）の詳細
+    if report['descriptive_elements_details']:
+        for element in report['descriptive_elements_details']:
+            print(f"\n要素タイプ: {element['type']}")
+            print(f"改善の要否: 問題なし")
+            print(f"テキスト: {element['text']}")
+            print(f"XPATH: {element.get('element_xpath', '不明')}")
+            print(f"評価: {element['evaluation']}")
+    
+    # 改善が必要な要素の詳細
     if report['non_descriptive_elements_details']:
-        print("\n=== 改善が必要な要素 ===")
         for element in report['non_descriptive_elements_details']:
             print(f"\n要素タイプ: {element['type']}")
+            print(f"改善の要否: 改善が必要")
             print(f"テキスト: {element['text']}")
             print(f"XPATH: {element.get('element_xpath', '不明')}")
             print(f"評価: {element['evaluation']}")

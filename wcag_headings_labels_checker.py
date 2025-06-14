@@ -175,6 +175,18 @@ def get_page_content(driver):
                             text = normalize_text(labelledby_element.text or '')
                         except:
                             pass
+                    
+                    # 要素内のimg要素のalt属性を確認
+                    if not text:
+                        try:
+                            img_elements = element.find_elements(By.TAG_NAME, 'img')
+                            for img in img_elements:
+                                img_alt = img.get_attribute("alt")
+                                if img_alt:
+                                    text = normalize_text(img_alt)
+                                    break
+                        except:
+                            pass
                 
                 # XPATHを識別子として使用
                 elements[xpath] = {
@@ -253,6 +265,18 @@ def get_page_content(driver):
                         placeholder = for_element.get_attribute("placeholder")
                         if placeholder:
                             text = normalize_text(placeholder)
+                    except:
+                        pass
+                
+                # 要素内のimg要素のalt属性を確認
+                if not text:
+                    try:
+                        img_elements = element.find_elements(By.TAG_NAME, 'img')
+                        for img in img_elements:
+                            img_alt = img.get_attribute("alt")
+                            if img_alt:
+                                text = normalize_text(img_alt)
+                                break
                     except:
                         pass
             
